@@ -5,15 +5,17 @@ https://www.infoq.com/articles/build-a-container-golang
 https://godoc.org/syscall
 http://man7.org/linux/man-pages/man2/clone.2.html
 
-
+-- based on code from - Liz Rice - aqua security
 --
 -- relate back to Scotts slides
 -- Containers Defense in Depth
 --
 https://docs.google.com/presentation/d/1566RF7dh2TRKOEsaY0VIoeoTRDQp5zzDgR1ebn6CBKw/edit#slide=id.g167dd20c9e_3_477
 
+-----------------------------------------------------
 
-
+-- in emacs
+stty -echo
 
 -----------------------------------------------------
 
@@ -46,7 +48,7 @@ func run() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-must(cmd.Run())
+        must(cmd.Run())
 }
 
 func must(err error) {
@@ -58,23 +60,27 @@ func must(err error) {
 
 --
 go run main.go run echo hello
-
 go run main.go run /bin/bash
 
 -- can see processes and filesystem
+id
 ls
 ps
 
-asroot hostname virt2
+sudo hostname container
+
 -- arghh! not very secure ...
 --
+-- from other terminal
+ps auxwww | grep "go run"
 
 -----------------------------------------------------
 -- (2) namespaces
 
 -- add in the ability for our process to
 -- system call for unix new time sharing system! means hostname
-
+-- UTS stands for "UNIX Timesharing System"
+-- process has a separate copy of the hostname
 
 package main
 
@@ -103,6 +109,7 @@ func run() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// namespace - hostname
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS,
 	}
@@ -121,8 +128,10 @@ func must(err error) {
 -- test hostname setting now
 -- we have protected hostname now !
 --
-virt:~/git/containers-from-scratch$ asroot go run main.go run /bin/bash
-Running [/bin/bash] 
+virt:~/git/containers-from-scratch$ sudo go run main.go run /bin/bash
+Running [/bin/bash]
+virt:~/git/containers-from-scratch$ id
+uid=0(root) gid=0(root) groups=0(root) context=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
 virt:~/git/containers-from-scratch$ hostname
 virt
 virt:~/git/containers-from-scratch$ hostname container
@@ -145,7 +154,6 @@ virt
 | syscall.CLONE_NEWPID,
 
 -- and it looks the same
-
 -- lets fork exec using "/proc/self/exe" - see man proc
 -- we can also now set hostname using fork exec
 
@@ -176,6 +184,7 @@ func run() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// namespace - hostname, pids
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID,
 	}
@@ -191,13 +200,22 @@ func child() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+        must(cmd.Run())
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 
 -- test
 -- looking better - pid 1, but we can still see all the pids in /proc
 -- so we need to give the process its own file system
 --
 
-virt:~/git/containers-from-scratch$ asroot go run main.go run /bin/bash
+virt:~/git/containers-from-scratch$ sudo go run main.go run /bin/bash
 Running [/bin/bash] as PID 1
 virt:~/git/containers-from-scratch$ ps
   PID TTY          TIME CMD
@@ -221,7 +239,7 @@ virt:~/git/containers-from-scratch$ ls /proc
 mkdir -p /home/mike/src/centos
 docker export $(docker create centos) | tar -C centos -xvf -
 
-touch rhel7/I_AM_A_ROOTFS
+touch /home/mike/src/centos/I_AM_A_ROOTFS
 
 -- now chroot into new fs and chdir to root in child
 --
@@ -232,7 +250,6 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-	"strconv"
 )
 
 // go run main.go run <cmd> <args>
@@ -309,7 +326,6 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-	"strconv"	
 )
 
 // go run main.go run <cmd> <args>
@@ -454,7 +470,7 @@ func must(err error) {
 -- test
 -- from virt
 ls /sys/fs/cgroup/pids/mike/
-virt:~$ cat /sys/fs/cgroup/pids/mike/pids.max 
+virt:~$ cat /sys/fs/cgroup/pids/mike/pids.max
 20
 
 cat /sys/fs/cgroup/pids/mike/pids.current 
@@ -506,7 +522,6 @@ ping 10.0.0.1
 -------------------------------
 
 --- non root containers
-
 
 package main
 
@@ -595,3 +610,119 @@ func must(err error) {
 	}
 }
 
+
+
+---------------------------------------------------------------------------
+
+-- line by line descriptions for fork bomb
+
+ls /sys/fs/cgroup/pids/mike/
+virt:~$ cat /sys/fs/cgroup/pids/mike/pids.max
+20
+
+cat /sys/fs/cgroup/pids/mike/pids.current 
+6
+
+-- fork bomb it
+:(){ :|: & };:
+
+This is called a fork bomb.
+:() means you are defining a function called :
+{:|: &} means run the function : and send its output to the : function again and run that in the background.
+The ; is a command separator, like &&.
+: runs the function the first time.
+Essentially you are creating a function that calls itself twice every call and doesn't have any way to terminate itself.
+It will keep doubling up until you run out of system resources.
+
+-- yay ! cgroups works
+
+virt:~$ cat /sys/fs/cgroup/pids/mike/pids.current 
+20
+
+
+-------
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
+	"path/filepath"
+	"io/ioutil"
+	"strconv"	
+)
+
+// go run main.go run <cmd> <args>
+func main() {
+	switch os.Args[1] {
+	case "run":
+		run()
+	case "child":
+		child()
+	default:
+		panic("help")
+	}
+}
+
+func run() {
+	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// hostname, pid, mount - namespaces
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID |
+		syscall.CLONE_NEWNS,
+	}
+
+	must(cmd.Run())
+}
+
+// fork exec a child process
+func child() {
+	fmt.Printf("Running %v as PID %d\n", os.Args[2:], os.Getpid())
+
+	cg()
+
+	// connect processes together
+	cmd := exec.Command(os.Args[2], os.Args[3:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// set our container hostname
+	must(syscall.Sethostname([]byte("container")))
+
+	// mount a root filesystem
+	must(syscall.Chroot("/home/mike/src/centos/"))
+
+	// change directory
+	must(syscall.Chdir("/"))
+
+	// mount the containers /proc so we can see processes
+	must(syscall.Mount("proc", "proc", "proc", 0, ""))
+
+	// run child
+	must(cmd.Run())
+	must(syscall.Unmount("proc", 0))
+}
+
+// setup cgroups
+func cg() {
+	cgroups := "/sys/fs/cgroup/"
+	pids := filepath.Join(cgroups, "pids")
+	os.Mkdir(filepath.Join(pids, "mike"), 0755)
+	must(ioutil.WriteFile(filepath.Join(pids, "mike/pids.max"), []byte("20"), 0700))
+	// Removes the new cgroup in place after the container exits
+	must(ioutil.WriteFile(filepath.Join(pids, "mike/notify_on_release"), []byte("1"), 0700))
+	must(ioutil.WriteFile(filepath.Join(pids, "mike/cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0700))
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
